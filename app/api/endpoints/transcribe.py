@@ -3,9 +3,15 @@ from app.services.transcriber import Transcriber
 from app.services.stream_handler import StreamHandler
 from pydantic import BaseModel
 import asyncio
+import logging
+import uuid
+from typing import Dict, Any
 
 router = APIRouter()
 transcriber = Transcriber()
+# 用于存储和跟踪活动任务
+active_tasks: Dict[str, Dict[str, Any]] = {}
+logger = logging.getLogger(__name__)
 
 
 class StreamURL(BaseModel):
@@ -16,13 +22,19 @@ class StreamURL(BaseModel):
 @router.post("/transcribe/")
 async def transcribe(audio_file: UploadFile = File(...)):
     """上传音频文件并进行语音识别"""
-    audio_data = await audio_file.read()
+    try:
+        audio_data = await audio_file.read()
 
-    transcriber.connect()
-    transcriber.send(audio_data)
-    transcriber.send_end_tag()
+        transcriber.connect()
+        transcriber.send(audio_data)
+        transcriber.send_end_tag()
 
-    return {"transcription": transcriber.get_transcription()}
+        return {"transcription": transcriber.get_transcription()}
+    except Exception as e:
+        logger.error(f"转录处理错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"转录处理错误: {str(e)}")
+    finally:
+        transcriber.close()
 
 
 @router.post("/transcribe/stream/")
@@ -35,31 +47,82 @@ async def transcribe_stream(stream_data: StreamURL):
         )
         transcriber.connect()
         process = stream_handler.open_stream()
+        
+        if not process:
+            raise HTTPException(status_code=500, detail="无法打开流")
+
+        # 生成唯一任务ID
+        task_id = str(uuid.uuid4())
 
         async def process_stream():
             try:
                 while True:
-                    #改进：避免阻塞
+                    # 避免阻塞
                     in_bytes = await asyncio.to_thread(process.stdout.read1, 4096)
                     if not in_bytes:
                         break
 
                     transcriber.send(in_bytes)
 
-                    #如果需要 WebSocket 实时推送结果，可以在这里加
-                    current_text = transcriber.get_transcription()
-
+                    # 更新任务状态和当前文本
+                    active_tasks[task_id]["current_text"] = transcriber.get_transcription()
+                    
             except Exception as e:
-                raise HTTPException(status_code=500, detail=f"流处理错误: {str(e)}")
+                logger.error(f"流处理错误: {str(e)}")
+                active_tasks[task_id]["error"] = str(e)
             finally:
-                #确保资源清理
+                # 确保资源清理
                 stream_handler.close()
                 transcriber.close()
+                active_tasks[task_id]["status"] = "completed"
 
-        #改进：返回 task，让调用方可以管理
+        # 创建并存储任务
         task = asyncio.create_task(process_stream())
+        active_tasks[task_id] = {
+            "task": task,
+            "status": "running",
+            "current_text": "",
+            "error": None
+        }
 
-        return {"message": "Stream processing started", "task_id": id(task)}
+        return {
+            "message": "Stream processing started", 
+            "task_id": task_id
+        }
 
     except Exception as e:
+        logger.error(f"启动流处理错误: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/transcribe/status/{task_id}")
+async def get_transcription_status(task_id: str):
+    """获取流转录任务的状态和结果"""
+    if task_id not in active_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task_info = active_tasks[task_id]
+    
+    return {
+        "status": task_info["status"],
+        "transcription": task_info["current_text"],
+        "error": task_info["error"]
+    }
+
+
+@router.delete("/transcribe/cancel/{task_id}")
+async def cancel_transcription(task_id: str):
+    """取消正在进行的转录任务"""
+    if task_id not in active_tasks:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    
+    task_info = active_tasks[task_id]
+    
+    if task_info["status"] == "running":
+        task_info["task"].cancel()
+        task_info["status"] = "cancelled"
+        
+        # 清理资源
+        transcriber.close()
+        
+    return {"message": f"任务 {task_id} 已取消"}
