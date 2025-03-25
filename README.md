@@ -37,7 +37,7 @@
    - 请求体格式：Form-data
    - 参数：
      - text：要翻译的文本（从转录接口获取）
-     - source_lang：源语言代码（如"zh"表示中文）
+     - source_lang：源语言代码（可以查看app/utils/language.py）
      - target_lang：目标语言代码（如"en"表示英文）
 
 2. **流式文本翻译**：
