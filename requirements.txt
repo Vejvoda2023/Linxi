@@ -5,3 +5,4 @@ numpy
 streamlink
 httpx
 pydub
+tenacity
