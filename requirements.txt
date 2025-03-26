@@ -6,3 +6,4 @@ streamlink
 httpx
 pydub
 tenacity
+python-dotenv

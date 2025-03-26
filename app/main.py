@@ -1,4 +1,10 @@
 from fastapi import FastAPI
+from dotenv import load_dotenv
+import os
+
+# 加载环境变量
+load_dotenv()
+
 from app.api.endpoints.transcribe import router as transcribe_router
 from app.api.endpoints.translate import router as translate_router
 
