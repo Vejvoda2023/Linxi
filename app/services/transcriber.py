@@ -10,8 +10,16 @@ from websocket import create_connection, WebSocketConnectionClosedException
 from urllib.parse import quote
 from contextlib import contextmanager
 from threading import Lock
+from dataclasses import dataclass
+from typing import List
 
 logger = logging.getLogger(__name__)
+
+@dataclass
+class TimestampedText:
+    text: str
+    start_time: float
+    end_time: float
 
 class WebsocketError(Exception):
     """WebSocket错误"""
@@ -28,6 +36,7 @@ class Transcriber:
         self.is_connected = False
         self.recv_thread = None
         self.result_text = ""
+        self.timestamped_results: List[TimestampedText] = []
         self._lock = Lock()  # 添加锁以保护并发访问
 
     def _generate_signature(self) -> tuple:
@@ -147,14 +156,32 @@ class Transcriber:
             try:
                 data = json.loads(result_dict["data"])
                 words = []
+                start_time = None
+                end_time = None
+                
                 for rt in data['cn']['st']['rt']:
+                    # 获取时间戳信息
+                    if 'begin' in rt:
+                        start_time = rt['begin'] / 1000  # 转换为秒
+                    if 'end' in rt:
+                        end_time = rt['end'] / 1000  # 转换为秒
+                    
                     for ws in rt['ws']:
                         for cw in ws['cw']:
                             words.append(cw['w'])
+                
                 word = ''.join(words)
-                with self._lock:
-                    self.result_text += word
-                logger.info(f"识别结果: {word}")
+                if word and start_time is not None and end_time is not None:
+                    with self._lock:
+                        self.result_text += word
+                        self.timestamped_results.append(
+                            TimestampedText(
+                                text=word,
+                                start_time=start_time,
+                                end_time=end_time
+                            )
+                        )
+                logger.info(f"识别结果: {word} (时间: {start_time:.2f}s - {end_time:.2f}s)")
             except Exception as e:
                 logger.error(f"解析识别结果时出错: {str(e)}")
 
@@ -174,9 +201,17 @@ class Transcriber:
             self.is_connected = False
             logger.info("连接已关闭")
 
-    def get_transcription(self):
-        """获取识别文本"""
+    def get_transcription(self, include_timestamps: bool = False):
+        """获取识别文本
+        Args:
+            include_timestamps: 是否包含时间戳信息
+        Returns:
+            如果 include_timestamps 为 True，返回带时间戳的结果列表
+            否则返回纯文本结果
+        """
         with self._lock:
+            if include_timestamps:
+                return self.timestamped_results
             return self.result_text
 
     def __enter__(self):

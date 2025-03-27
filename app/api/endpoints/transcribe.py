@@ -1,11 +1,11 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from app.services.transcriber import Transcriber
+from app.services.transcriber import Transcriber, TimestampedText
 from app.services.stream_handler import StreamHandler
 from pydantic import BaseModel
 import asyncio
 import logging
 import uuid
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 router = APIRouter()
 transcriber = Transcriber()
@@ -19,9 +19,24 @@ class StreamURL(BaseModel):
     preferred_quality: str = "audio_only"
 
 
-@router.post("/transcribe/")
-async def transcribe(audio_file: UploadFile = File(...)):
-    """上传音频文件并进行语音识别"""
+class TimestampedResponse(BaseModel):
+    text: str
+    start_time: float
+    end_time: float
+
+
+class TranscriptionResponse(BaseModel):
+    transcription: str
+    timestamps: Optional[List[TimestampedResponse]] = None
+
+
+@router.post("/transcribe/", response_model=TranscriptionResponse)
+async def transcribe(audio_file: UploadFile = File(...), include_timestamps: bool = False):
+    """上传音频文件并进行语音识别
+    Args:
+        audio_file: 音频文件
+        include_timestamps: 是否包含时间戳信息
+    """
     try:
         audio_data = await audio_file.read()
 
@@ -29,7 +44,17 @@ async def transcribe(audio_file: UploadFile = File(...)):
         transcriber.send(audio_data)
         transcriber.send_end_tag()
 
-        return {"transcription": transcriber.get_transcription()}
+        result = transcriber.get_transcription(include_timestamps=include_timestamps)
+        if include_timestamps:
+            return TranscriptionResponse(
+                transcription="".join(item.text for item in result),
+                timestamps=[TimestampedResponse(
+                    text=item.text,
+                    start_time=item.start_time,
+                    end_time=item.end_time
+                ) for item in result]
+            )
+        return TranscriptionResponse(transcription=result)
     except Exception as e:
         logger.error(f"转录处理错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"转录处理错误: {str(e)}")
@@ -38,8 +63,12 @@ async def transcribe(audio_file: UploadFile = File(...)):
 
 
 @router.post("/transcribe/stream/")
-async def transcribe_stream(stream_data: StreamURL):
-    """处理直播流并进行实时语音识别"""
+async def transcribe_stream(stream_data: StreamURL, include_timestamps: bool = False):
+    """处理直播流并进行实时语音识别
+    Args:
+        stream_data: 流媒体URL信息
+        include_timestamps: 是否包含时间戳信息
+    """
     try:
         stream_handler = StreamHandler(
             url=stream_data.url,
@@ -65,7 +94,18 @@ async def transcribe_stream(stream_data: StreamURL):
                     transcriber.send(in_bytes)
 
                     # 更新任务状态和当前文本
-                    active_tasks[task_id]["current_text"] = transcriber.get_transcription()
+                    result = transcriber.get_transcription(include_timestamps=include_timestamps)
+                    if include_timestamps:
+                        active_tasks[task_id]["current_text"] = "".join(item.text for item in result)
+                        active_tasks[task_id]["timestamps"] = [
+                            {
+                                "text": item.text,
+                                "start_time": item.start_time,
+                                "end_time": item.end_time
+                            } for item in result
+                        ]
+                    else:
+                        active_tasks[task_id]["current_text"] = result
                     
             except Exception as e:
                 logger.error(f"流处理错误: {str(e)}")
@@ -82,6 +122,7 @@ async def transcribe_stream(stream_data: StreamURL):
             "task": task,
             "status": "running",
             "current_text": "",
+            "timestamps": [] if include_timestamps else None,
             "error": None
         }
 
@@ -95,7 +136,7 @@ async def transcribe_stream(stream_data: StreamURL):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/transcribe/status/{task_id}")
+@router.get("/transcribe/status/{task_id}", response_model=TranscriptionResponse)
 async def get_transcription_status(task_id: str):
     """获取流转录任务的状态和结果"""
     if task_id not in active_tasks:
@@ -103,11 +144,10 @@ async def get_transcription_status(task_id: str):
     
     task_info = active_tasks[task_id]
     
-    return {
-        "status": task_info["status"],
-        "transcription": task_info["current_text"],
-        "error": task_info["error"]
-    }
+    return TranscriptionResponse(
+        transcription=task_info["current_text"],
+        timestamps=task_info.get("timestamps")
+    )
 
 
 @router.delete("/transcribe/cancel/{task_id}")
